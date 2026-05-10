@@ -13,7 +13,8 @@
     <script type="importmap">
       {
         "imports": {
-          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
         }
       }
     </script>
@@ -36,6 +37,7 @@
         <button class="dir down" data-dir="back" aria-label="Back">▼</button>
       </div>
       <button id="drop" class="drop">DROP</button>
+      <button id="reset-view" class="reset" aria-label="Reset view">⟳</button>
     </div>
 
     <script type="module" src="/app.js"></script>

@@ -1,37 +1,48 @@
 import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
 // --- Cabinet dimensions (world units) ---------------------------------------
 const CAB = {
-  width: 6, // X span (interior)
-  depth: 5, // Z span (interior)
-  height: 7, // Y span (interior)
+  width: 6,
+  depth: 5,
+  height: 7,
   wall: 0.12,
   floorY: 0,
 };
 
-// Drop chute is a square hole in the floor at -X / -Z corner.
 const CHUTE = {
   size: 1.2,
   cx: -CAB.width / 2 + 0.9,
   cz: -CAB.depth / 2 + 0.9,
 };
 
-// Claw motion bounds (interior, with margin so claw doesn't clip walls).
 const CLAW_BOUNDS = {
   minX: -CAB.width / 2 + 0.6,
   maxX: CAB.width / 2 - 0.6,
   minZ: -CAB.depth / 2 + 0.6,
   maxZ: CAB.depth / 2 - 0.6,
-  topY: CAB.height - 1.0,
-  bottomY: CAB.floorY + 0.55,
+  topY: CAB.height - 1.2,
+  bottomY: CAB.floorY + 0.7,
 };
 
 const PRIZE_COUNT = 14;
 const PRIZE_RADIUS = 0.42;
-const GRAB_RADIUS = 0.55;
-const MOVE_SPEED = 3.0; // units / second
-const VERTICAL_SPEED = 2.5;
+const GRAB_RADIUS = 0.65;
+
+// Movement tuning — input feeds a target velocity that's damped into actual.
+const MAX_HORIZ_SPEED = 3.0;
+const HORIZ_ACCEL = 14.0; // velocity smoothing factor (per second)
+const VERTICAL_SPEED = 2.6;
 const GRAVITY = -9.0;
+
+// Physics step
+const PHYS_DT = 1 / 120;
+const MAX_FRAME_DT = 1 / 30;
+
+// Finger curl tuning (per joint, radians; positive = inward curl)
+const FINGER_REST = [-0.18, -0.05, 0.05]; // open/relaxed
+const FINGER_CLOSE = [0.55, 0.85, 0.95]; // closed/grabbing
+const FINGER_LERP = 9.0; // smoothing rate (higher = snappier)
 
 // --- Renderer / scene -------------------------------------------------------
 const canvas = document.getElementById("scene");
@@ -39,6 +50,7 @@ const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
   alpha: false,
+  powerPreference: "high-performance",
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
@@ -50,22 +62,29 @@ scene.background = new THREE.Color(0x0e0e1a);
 scene.fog = new THREE.Fog(0x0e0e1a, 18, 36);
 
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
-function placeCamera() {
-  const portrait = window.innerHeight > window.innerWidth;
-  if (portrait) {
-    camera.position.set(0, 5.5, 11.5);
-  } else {
-    camera.position.set(0, 5.0, 10.5);
-  }
-  camera.lookAt(0, 3.0, 0);
-}
+const INITIAL_CAM = new THREE.Vector3(0, 5.2, 11.0);
+const INITIAL_TARGET = new THREE.Vector3(0, 3.0, 0);
+camera.position.copy(INITIAL_CAM);
+camera.lookAt(INITIAL_TARGET);
+
+const controls = new OrbitControls(camera, canvas);
+controls.target.copy(INITIAL_TARGET);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.enablePan = false;
+controls.minDistance = 7;
+controls.maxDistance = 18;
+controls.minPolarAngle = 0.25;
+controls.maxPolarAngle = Math.PI * 0.48;
+controls.rotateSpeed = 0.8;
+controls.zoomSpeed = 0.7;
+controls.update();
 
 function resize() {
   const w = window.innerWidth;
   const h = window.innerHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
-  placeCamera();
   camera.updateProjectionMatrix();
 }
 window.addEventListener("resize", resize);
@@ -84,21 +103,16 @@ keyLight.shadow.camera.top = 10;
 keyLight.shadow.camera.bottom = -10;
 keyLight.shadow.camera.near = 0.5;
 keyLight.shadow.camera.far = 30;
+keyLight.shadow.bias = -0.0005;
 scene.add(keyLight);
 
-const pinkLight = new THREE.PointLight(0xff5599, 0.7, 18);
-pinkLight.position.set(-4, 6, 4);
-scene.add(pinkLight);
-
-const blueLight = new THREE.PointLight(0x59c2ff, 0.7, 18);
-blueLight.position.set(4, 6, -4);
-scene.add(blueLight);
+scene.add(new THREE.PointLight(0xff5599, 0.7, 18).translateX(-4).translateY(6).translateZ(4));
+scene.add(new THREE.PointLight(0x59c2ff, 0.7, 18).translateX(4).translateY(6).translateZ(-4));
 
 // --- Cabinet ---------------------------------------------------------------
 const cabinet = new THREE.Group();
 scene.add(cabinet);
 
-// Floor with chute hole, made from 4 strips around the chute.
 const floorMat = new THREE.MeshStandardMaterial({
   color: 0x2a2540,
   roughness: 0.7,
@@ -118,20 +132,16 @@ function makeFloorWithHole() {
   const zNearEnd = cz - cs / 2;
   const zFarStart = cz + cs / 2;
 
-  // Strip A: full width, in front of chute (negative Z side)
-  addStrip(-W / 2, xLeftEnd, -D / 2, D / 2); // left of chute, full depth
-  addStrip(xRightStart, W / 2, -D / 2, D / 2); // right of chute, full depth
-  addStrip(xLeftEnd, xRightStart, -D / 2, zNearEnd); // gap between, in front
-  addStrip(xLeftEnd, xRightStart, zFarStart, D / 2); // gap between, behind
+  addStrip(-W / 2, xLeftEnd, -D / 2, D / 2);
+  addStrip(xRightStart, W / 2, -D / 2, D / 2);
+  addStrip(xLeftEnd, xRightStart, -D / 2, zNearEnd);
+  addStrip(xLeftEnd, xRightStart, zFarStart, D / 2);
 
   function addStrip(x0, x1, z0, z1) {
     const w = x1 - x0;
     const d = z1 - z0;
     if (w <= 0 || d <= 0) return;
-    const m = new THREE.Mesh(
-      new THREE.BoxGeometry(w, 0.1, d),
-      floorMat,
-    );
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.1, d), floorMat);
     m.position.set((x0 + x1) / 2, CAB.floorY - 0.05, (z0 + z1) / 2);
     m.receiveShadow = true;
     g.add(m);
@@ -141,7 +151,6 @@ function makeFloorWithHole() {
 }
 cabinet.add(makeFloorWithHole());
 
-// Glass walls
 const glassMat = new THREE.MeshPhysicalMaterial({
   color: 0xaad9ff,
   transmission: 0.85,
@@ -160,12 +169,11 @@ function makeWall(w, h, d, x, y, z) {
 }
 const H = CAB.height;
 const T = CAB.wall;
-makeWall(CAB.width, H, T, 0, H / 2, -CAB.depth / 2); // back
-makeWall(CAB.width, H, T, 0, H / 2, CAB.depth / 2); // front
-makeWall(T, H, CAB.depth, -CAB.width / 2, H / 2, 0); // left
-makeWall(T, H, CAB.depth, CAB.width / 2, H / 2, 0); // right
+makeWall(CAB.width, H, T, 0, H / 2, -CAB.depth / 2);
+makeWall(CAB.width, H, T, 0, H / 2, CAB.depth / 2);
+makeWall(T, H, CAB.depth, -CAB.width / 2, H / 2, 0);
+makeWall(T, H, CAB.depth, CAB.width / 2, H / 2, 0);
 
-// Frame edges
 const frameMat = new THREE.MeshStandardMaterial({
   color: 0xffaa55,
   metalness: 0.4,
@@ -179,29 +187,18 @@ function makeBeam(w, h, d, x, y, z) {
   cabinet.add(m);
 }
 const BEAM = 0.18;
-// vertical corners
 for (const sx of [-1, 1])
   for (const sz of [-1, 1])
-    makeBeam(
-      BEAM,
-      H + 0.1,
-      BEAM,
-      (sx * CAB.width) / 2,
-      H / 2,
-      (sz * CAB.depth) / 2,
-    );
-// top frame
+    makeBeam(BEAM, H + 0.1, BEAM, (sx * CAB.width) / 2, H / 2, (sz * CAB.depth) / 2);
 makeBeam(CAB.width + BEAM, BEAM, BEAM, 0, H, -CAB.depth / 2);
 makeBeam(CAB.width + BEAM, BEAM, BEAM, 0, H, CAB.depth / 2);
 makeBeam(BEAM, BEAM, CAB.depth + BEAM, -CAB.width / 2, H, 0);
 makeBeam(BEAM, BEAM, CAB.depth + BEAM, CAB.width / 2, H, 0);
-// bottom frame
 makeBeam(CAB.width + BEAM, BEAM, BEAM, 0, 0, -CAB.depth / 2);
 makeBeam(CAB.width + BEAM, BEAM, BEAM, 0, 0, CAB.depth / 2);
 makeBeam(BEAM, BEAM, CAB.depth + BEAM, -CAB.width / 2, 0, 0);
 makeBeam(BEAM, BEAM, CAB.depth + BEAM, CAB.width / 2, 0, 0);
 
-// Chute marker (gold ring on floor edge)
 {
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(CHUTE.size * 0.45, CHUTE.size * 0.55, 32),
@@ -216,7 +213,6 @@ makeBeam(BEAM, BEAM, CAB.depth + BEAM, CAB.width / 2, 0, 0);
 const gantry = new THREE.Group();
 scene.add(gantry);
 
-// X-rail (runs along X at top, moves in Z)
 const railMat = new THREE.MeshStandardMaterial({
   color: 0xc8c8d6,
   metalness: 0.7,
@@ -229,24 +225,20 @@ const xRail = new THREE.Mesh(
 xRail.position.y = CAB.height - 0.3;
 gantry.add(xRail);
 
-// Carriage on the rail (moves in X), holds the cable
 const carriage = new THREE.Group();
 gantry.add(carriage);
 const carriageBody = new THREE.Mesh(
   new THREE.BoxGeometry(0.4, 0.18, 0.24),
   railMat,
 );
-carriageBody.position.y = CAB.height - 0.3;
 carriage.add(carriageBody);
 
-// Cable
 const cable = new THREE.Mesh(
   new THREE.CylinderGeometry(0.025, 0.025, 1, 8),
   new THREE.MeshStandardMaterial({ color: 0x222233, roughness: 0.8 }),
 );
 carriage.add(cable);
 
-// Claw assembly
 const clawGroup = new THREE.Group();
 carriage.add(clawGroup);
 
@@ -255,72 +247,141 @@ const clawBodyMat = new THREE.MeshStandardMaterial({
   metalness: 0.85,
   roughness: 0.25,
 });
+const clawJointMat = new THREE.MeshStandardMaterial({
+  color: 0x9a9aac,
+  metalness: 0.6,
+  roughness: 0.4,
+});
 const clawTipMat = new THREE.MeshStandardMaterial({
   color: 0xff7799,
   metalness: 0.5,
   roughness: 0.4,
 });
 
-// Hub
+// Hub housing
 const hub = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.22, 0.28, 0.22, 24),
+  new THREE.CylinderGeometry(0.32, 0.38, 0.28, 28),
   clawBodyMat,
 );
 hub.castShadow = true;
 clawGroup.add(hub);
+const hubCap = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.18, 0.32, 0.16, 28),
+  clawJointMat,
+);
+hubCap.position.y = 0.18;
+clawGroup.add(hubCap);
 
-// Three fingers, each is a pivot group with a finger mesh.
+// Build a single curved finger as a 3-segment kinematic chain.
+// Each segment: pivot at the joint, mesh hangs along -Y. The next pivot
+// anchors at the far end of the segment, so curl propagates naturally.
+function buildFinger(angleAround) {
+  const root = new THREE.Group();
+  // Anchor on the rim of the hub
+  root.position.set(
+    Math.cos(angleAround) * 0.30,
+    -0.10,
+    Math.sin(angleAround) * 0.30,
+  );
+  // Orient so curl axis (+Z local) is tangential — curling inward bends
+  // segments toward the hub center.
+  root.rotation.y = -angleAround;
+
+  const segLengths = [0.30, 0.26, 0.22];
+  const radii = [0.10, 0.085, 0.07, 0.05]; // top, ..., tip
+  const pivots = [];
+
+  let parent = root;
+  for (let i = 0; i < segLengths.length; i++) {
+    const pivot = new THREE.Group();
+    parent.add(pivot);
+
+    const seg = new THREE.Mesh(
+      new THREE.CylinderGeometry(radii[i + 1], radii[i], segLengths[i], 14),
+      clawBodyMat,
+    );
+    seg.castShadow = true;
+    seg.position.y = -segLengths[i] / 2;
+    pivot.add(seg);
+
+    // Joint sphere at top of segment for the 'mechanical' look
+    const joint = new THREE.Mesh(
+      new THREE.SphereGeometry(radii[i] * 1.15, 14, 10),
+      clawJointMat,
+    );
+    joint.castShadow = true;
+    pivot.add(joint);
+
+    pivots.push(pivot);
+
+    const nextAnchor = new THREE.Group();
+    nextAnchor.position.y = -segLengths[i];
+    pivot.add(nextAnchor);
+    parent = nextAnchor;
+  }
+
+  // Pointed tip at the end of the chain
+  const tip = new THREE.Mesh(
+    new THREE.ConeGeometry(0.07, 0.18, 14),
+    clawTipMat,
+  );
+  tip.castShadow = true;
+  tip.rotation.x = Math.PI;
+  tip.position.y = -0.09;
+  parent.add(tip);
+
+  return { root, pivots };
+}
+
 const FINGER_COUNT = 3;
 const fingers = [];
 for (let i = 0; i < FINGER_COUNT; i++) {
   const angle = (i / FINGER_COUNT) * Math.PI * 2;
-  const pivot = new THREE.Group();
-  pivot.position.set(
-    Math.cos(angle) * 0.22,
-    -0.08,
-    Math.sin(angle) * 0.22,
-  );
-  pivot.rotation.y = -angle + Math.PI / 2;
-  clawGroup.add(pivot);
-
-  const fingerMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(0.1, 0.55, 0.14),
-    clawBodyMat,
-  );
-  fingerMesh.castShadow = true;
-  fingerMesh.position.set(0, -0.27, 0);
-  pivot.add(fingerMesh);
-
-  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.18, 12), clawTipMat);
-  tip.castShadow = true;
-  tip.rotation.x = Math.PI;
-  tip.position.set(0, -0.6, 0);
-  pivot.add(tip);
-
-  fingers.push(pivot);
+  const f = buildFinger(angle);
+  // Initialize at rest pose
+  for (let j = 0; j < f.pivots.length; j++) {
+    f.pivots[j].rotation.z = FINGER_REST[j];
+  }
+  clawGroup.add(f.root);
+  fingers.push(f);
 }
 
-// State for claw position
+// --- Claw kinematics ------------------------------------------------------
 const claw = {
+  // Position state
   x: 0,
   z: 0,
   y: CLAW_BOUNDS.topY,
-  open: 1, // 1 fully open, 0 closed
+  // Smoothed velocity
+  vx: 0,
+  vz: 0,
+  // Curl: 0 = open (rest), 1 = fully closed
+  curl: 0,
+  curlTarget: 0,
   carried: null,
 };
 
 function updateClawTransforms() {
+  // Carriage rides the rail in X (so its X follows claw.x), the rail itself
+  // slides in Z so the user's Z motion looks like a moving track.
   carriage.position.set(claw.x, 0, 0);
   xRail.position.set(0, CAB.height - 0.3, claw.z);
-  // carriage body slides along its own X but stays at same Z as rail
   carriageBody.position.set(0, CAB.height - 0.3, claw.z);
-  cable.position.set(0, (CAB.height - 0.3 + claw.y + 0.1) / 2, claw.z);
-  cable.scale.y = Math.max(0.05, CAB.height - 0.3 - (claw.y + 0.1));
+
+  const cableTopY = CAB.height - 0.3;
+  const cableBotY = claw.y + 0.18;
+  const len = Math.max(0.05, cableTopY - cableBotY);
+  cable.position.set(0, (cableTopY + cableBotY) / 2, claw.z);
+  cable.scale.y = len;
+
   clawGroup.position.set(0, claw.y, claw.z);
-  // open factor: 0 = closed (fingers tilted inward), 1 = open
-  const tilt = (1 - claw.open) * 0.55; // radians inward
-  for (const p of fingers) {
-    p.rotation.z = -tilt;
+
+  // Apply curl angles per joint, eased between rest and close pose.
+  const c = claw.curl;
+  for (const f of fingers) {
+    for (let j = 0; j < f.pivots.length; j++) {
+      f.pivots[j].rotation.z = FINGER_REST[j] * (1 - c) + FINGER_CLOSE[j] * c;
+    }
   }
 }
 
@@ -460,6 +521,13 @@ window.addEventListener("keyup", (e) => {
   }
 });
 
+// Reset view
+document.getElementById("reset-view").addEventListener("click", () => {
+  camera.position.copy(INITIAL_CAM);
+  controls.target.copy(INITIAL_TARGET);
+  controls.update();
+});
+
 // --- Game state ------------------------------------------------------------
 const STATE = {
   IDLE: "idle",
@@ -480,7 +548,6 @@ const dropBtn = document.getElementById("drop");
 function setStatus(text) {
   statusEl.textContent = text;
 }
-
 function setScore(n) {
   score = n;
   scoreEl.textContent = `Score: ${score}`;
@@ -499,39 +566,76 @@ dropBtn.addEventListener("touchstart", (e) => {
   requestDrop();
 });
 
-// --- Animation loop --------------------------------------------------------
-const clock = new THREE.Clock();
+// --- Camera-relative movement basis ---------------------------------------
+const _camForward = new THREE.Vector3();
+const _camRight = new THREE.Vector3();
+const _worldUp = new THREE.Vector3(0, 1, 0);
 
-function step() {
-  const dt = Math.min(clock.getDelta(), 1 / 30);
-  update(dt);
-  renderer.render(scene, camera);
-  requestAnimationFrame(step);
+function updateCameraBasis() {
+  camera.getWorldDirection(_camForward);
+  _camForward.y = 0;
+  if (_camForward.lengthSq() < 1e-6) _camForward.set(0, 0, -1);
+  _camForward.normalize();
+  _camRight.crossVectors(_camForward, _worldUp).normalize();
 }
 
-function update(dt) {
-  // Horizontal control only when idle.
+// --- Animation loop --------------------------------------------------------
+const clock = new THREE.Clock();
+let physAccumulator = 0;
+
+function loop() {
+  const frameDt = Math.min(clock.getDelta(), MAX_FRAME_DT);
+  physAccumulator += frameDt;
+  while (physAccumulator >= PHYS_DT) {
+    fixedUpdate(PHYS_DT);
+    physAccumulator -= PHYS_DT;
+  }
+  // Smoothly drive visual properties even if no physics step happened
+  visualUpdate(frameDt);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+function fixedUpdate(dt) {
+  // Camera-relative target velocity from input, only when idle.
+  let tvx = 0,
+    tvz = 0;
   if (state === STATE.IDLE) {
-    let dx = 0,
-      dz = 0;
-    if (input.left) dx -= 1;
-    if (input.right) dx += 1;
-    if (input.forward) dz -= 1;
-    if (input.back) dz += 1;
-    if (dx !== 0 || dz !== 0) {
-      const len = Math.hypot(dx, dz) || 1;
-      claw.x = clamp(
-        claw.x + (dx / len) * MOVE_SPEED * dt,
-        CLAW_BOUNDS.minX,
-        CLAW_BOUNDS.maxX,
-      );
-      claw.z = clamp(
-        claw.z + (dz / len) * MOVE_SPEED * dt,
-        CLAW_BOUNDS.minZ,
-        CLAW_BOUNDS.maxZ,
-      );
+    updateCameraBasis();
+    let f = 0,
+      r = 0;
+    if (input.forward) f += 1;
+    if (input.back) f -= 1;
+    if (input.right) r += 1;
+    if (input.left) r -= 1;
+    if (f !== 0 || r !== 0) {
+      const len = Math.hypot(f, r) || 1;
+      f /= len;
+      r /= len;
+      tvx = (_camForward.x * f + _camRight.x * r) * MAX_HORIZ_SPEED;
+      tvz = (_camForward.z * f + _camRight.z * r) * MAX_HORIZ_SPEED;
+    }
+  } else if (state === STATE.RETURNING) {
+    // Smooth approach to chute
+    const dx = CHUTE.cx - claw.x;
+    const dz = CHUTE.cz - claw.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 1e-3) {
+      const s = Math.min(MAX_HORIZ_SPEED, dist * 4); // ease-in
+      tvx = (dx / dist) * s;
+      tvz = (dz / dist) * s;
     }
   }
+
+  // Damped velocity integration (exponential smoothing toward target)
+  const k = 1 - Math.exp(-HORIZ_ACCEL * dt);
+  claw.vx += (tvx - claw.vx) * k;
+  claw.vz += (tvz - claw.vz) * k;
+  claw.x += claw.vx * dt;
+  claw.z += claw.vz * dt;
+  claw.x = clamp(claw.x, CLAW_BOUNDS.minX, CLAW_BOUNDS.maxX);
+  claw.z = clamp(claw.z, CLAW_BOUNDS.minZ, CLAW_BOUNDS.maxZ);
 
   // Drop sequence
   switch (state) {
@@ -541,14 +645,14 @@ function update(dt) {
         claw.y = CLAW_BOUNDS.bottomY;
         state = STATE.GRAB;
         stateTimer = 0;
+        claw.curlTarget = 1;
         attemptGrab();
       }
       break;
     }
     case STATE.GRAB: {
       stateTimer += dt;
-      claw.open = Math.max(0.1, 1 - stateTimer / 0.4);
-      if (stateTimer >= 0.45) {
+      if (stateTimer >= 0.55) {
         state = STATE.RAISING;
         stateTimer = 0;
       }
@@ -565,29 +669,21 @@ function update(dt) {
       break;
     }
     case STATE.RETURNING: {
-      const tx = CHUTE.cx;
-      const tz = CHUTE.cz;
-      const dx = tx - claw.x;
-      const dz = tz - claw.z;
-      const dist = Math.hypot(dx, dz);
-      const stepLen = MOVE_SPEED * dt;
-      if (dist <= stepLen) {
-        claw.x = tx;
-        claw.z = tz;
+      const dist = Math.hypot(CHUTE.cx - claw.x, CHUTE.cz - claw.z);
+      if (dist < 0.03 && Math.hypot(claw.vx, claw.vz) < 0.05) {
+        claw.x = CHUTE.cx;
+        claw.z = CHUTE.cz;
+        claw.vx = claw.vz = 0;
         state = STATE.RELEASE;
         stateTimer = 0;
-      } else {
-        claw.x += (dx / dist) * stepLen;
-        claw.z += (dz / dist) * stepLen;
+        claw.curlTarget = 0;
       }
       break;
     }
     case STATE.RELEASE: {
       stateTimer += dt;
-      claw.open = Math.min(1, stateTimer / 0.3);
-      if (stateTimer >= 0.35) {
+      if (stateTimer >= 0.45) {
         if (claw.carried) {
-          // Drop into chute: prize falls and gets collected.
           claw.carried.vel.set(0, 0, 0);
           claw.carried = null;
         }
@@ -597,48 +693,56 @@ function update(dt) {
       }
       break;
     }
+    case STATE.IDLE: {
+      claw.curlTarget = 0;
+      break;
+    }
   }
 
-  // Carried prize follows claw tip
+  // Carried prize tracks the claw tip smoothly.
   if (claw.carried) {
     const p = claw.carried;
-    p.mesh.position.set(claw.x, claw.y - 0.6, claw.z);
+    const targetX = claw.x;
+    const targetY = claw.y - 0.78;
+    const targetZ = claw.z;
+    const a = 1 - Math.exp(-18 * dt);
+    p.mesh.position.x += (targetX - p.mesh.position.x) * a;
+    p.mesh.position.y += (targetY - p.mesh.position.y) * a;
+    p.mesh.position.z += (targetZ - p.mesh.position.z) * a;
     p.vel.set(0, 0, 0);
   }
 
-  // Physics for free prizes
+  // Free-prize physics
   for (const p of prizes) {
-    if (p === claw.carried) continue;
-    if (p.collected) continue;
-
+    if (p === claw.carried || p.collected) continue;
     p.vel.y += GRAVITY * dt;
     p.mesh.position.x += p.vel.x * dt;
     p.mesh.position.y += p.vel.y * dt;
     p.mesh.position.z += p.vel.z * dt;
 
-    // Collect if dropped through chute
     if (
       p.mesh.position.y < -1.5 ||
       (p.mesh.position.y < CAB.floorY + p.radius &&
         insideChute(p.mesh.position.x, p.mesh.position.z))
     ) {
-      if (!p.collected) {
-        p.collected = true;
-        scene.remove(p.mesh);
-        setScore(score + 1);
-        setStatus("Got one!");
-      }
+      p.collected = true;
+      scene.remove(p.mesh);
+      setScore(score + 1);
+      setStatus("Got one!");
       continue;
     }
 
-    // Floor
     if (p.mesh.position.y < CAB.floorY + p.radius) {
       p.mesh.position.y = CAB.floorY + p.radius;
       if (p.vel.y < 0) p.vel.y = -p.vel.y * 0.25;
-      p.vel.x *= 0.85;
-      p.vel.z *= 0.85;
+      p.vel.x *= 0.86;
+      p.vel.z *= 0.86;
+      // sleep tiny velocities to avoid jitter
+      if (Math.abs(p.vel.y) < 0.05) p.vel.y = 0;
+      if (Math.abs(p.vel.x) < 0.02) p.vel.x = 0;
+      if (Math.abs(p.vel.z) < 0.02) p.vel.z = 0;
     }
-    // Walls (interior)
+
     const halfW = CAB.width / 2 - p.radius;
     const halfD = CAB.depth / 2 - p.radius;
     if (p.mesh.position.x < -halfW) {
@@ -657,7 +761,7 @@ function update(dt) {
     }
   }
 
-  // Prize–prize separation (cheap)
+  // Cheap pairwise separation
   for (let i = 0; i < prizes.length; i++) {
     const a = prizes[i];
     if (a.collected || a === claw.carried) continue;
@@ -665,13 +769,13 @@ function update(dt) {
       const b = prizes[j];
       if (b.collected || b === claw.carried) continue;
       const dx = b.mesh.position.x - a.mesh.position.x;
-      const dz = b.mesh.position.z - a.mesh.position.z;
       const dy = b.mesh.position.y - a.mesh.position.y;
+      const dz = b.mesh.position.z - a.mesh.position.z;
       const distSq = dx * dx + dy * dy + dz * dz;
       const minDist = a.radius + b.radius;
       if (distSq > 0 && distSq < minDist * minDist) {
         const dist = Math.sqrt(distSq);
-        const overlap = (minDist - dist) / 2;
+        const overlap = (minDist - dist) * 0.5;
         const nx = dx / dist;
         const ny = dy / dist;
         const nz = dz / dist;
@@ -681,37 +785,37 @@ function update(dt) {
         b.mesh.position.x += nx * overlap;
         b.mesh.position.y += ny * overlap;
         b.mesh.position.z += nz * overlap;
-        a.vel.x -= nx * 0.2;
-        a.vel.z -= nz * 0.2;
-        b.vel.x += nx * 0.2;
-        b.vel.z += nz * 0.2;
+        a.vel.x -= nx * 0.15;
+        a.vel.z -= nz * 0.15;
+        b.vel.x += nx * 0.15;
+        b.vel.z += nz * 0.15;
       }
     }
   }
+}
 
-  // Decorative claw open/close visuals when idle
-  if (state === STATE.IDLE || state === STATE.DROPPING) {
-    claw.open = 1;
-  }
-
+function visualUpdate(dt) {
+  // Smooth curl toward target so finger motion is buttery.
+  const k = 1 - Math.exp(-FINGER_LERP * dt);
+  claw.curl += (claw.curlTarget - claw.curl) * k;
   updateClawTransforms();
 
-  // Respawn if everything collected
-  if (prizes.every((p) => p.collected) && state === STATE.IDLE) {
+  // Refill if empty (only when idle)
+  if (state === STATE.IDLE && prizes.every((p) => p.collected)) {
     setStatus("Refilling prizes...");
     for (const p of prizes) scene.remove(p.mesh);
     prizes.length = 0;
     spawnPrizes();
-    setTimeout(() => setStatus("Move the claw and press Drop"), 1200);
+    setTimeout(() => {
+      if (state === STATE.IDLE) setStatus("Move the claw and press Drop");
+    }, 1200);
   }
 }
 
 function attemptGrab() {
-  // Find nearest prize within grab radius of claw tip.
   const tipX = claw.x;
-  const tipY = claw.y - 0.5;
+  const tipY = claw.y - 0.55;
   const tipZ = claw.z;
-
   let best = null;
   let bestDistSq = GRAB_RADIUS * GRAB_RADIUS;
   for (const p of prizes) {
@@ -725,14 +829,10 @@ function attemptGrab() {
       best = p;
     }
   }
-
-  if (best) {
-    // 70% grab probability for a bit of arcade feel.
-    if (Math.random() < 0.7) {
-      claw.carried = best;
-      setStatus("Grabbed!");
-      return;
-    }
+  if (best && Math.random() < 0.7) {
+    claw.carried = best;
+    setStatus("Grabbed!");
+    return;
   }
   setStatus("Missed — try again");
 }
@@ -741,9 +841,8 @@ function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
-// Kick off
 resize();
 updateClawTransforms();
 setScore(0);
 setStatus("Move the claw and press Drop");
-step();
+loop();
