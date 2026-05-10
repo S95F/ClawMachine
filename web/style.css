@@ -73,7 +73,7 @@ body {
   color: var(--accent-2);
 }
 
-.assist-btn {
+.difficulty-btn {
   appearance: none;
   border: 0;
   background: rgba(255, 255, 255, 0.08);
@@ -87,24 +87,28 @@ body {
   transition: background 0.15s ease, transform 0.05s ease;
 }
 
-.assist-btn:hover {
+.difficulty-btn:hover {
   background: rgba(255, 255, 255, 0.14);
 }
 
-.assist-btn:active {
+.difficulty-btn:active {
   transform: scale(0.96);
 }
 
-.assist-btn.lvl-light {
-  background: rgba(89, 194, 255, 0.25);
+.difficulty-btn.lvl-easy {
+  background: rgba(106, 218, 153, 0.30);
 }
 
-.assist-btn.lvl-medium {
+.difficulty-btn.lvl-medium {
   background: rgba(255, 209, 102, 0.28);
 }
 
-.assist-btn.lvl-strong {
-  background: rgba(255, 85, 119, 0.32);
+.difficulty-btn.lvl-hard {
+  background: rgba(89, 194, 255, 0.25);
+}
+
+.difficulty-btn.lvl-impossible {
+  background: rgba(255, 85, 119, 0.34);
 }
 
 #status {
