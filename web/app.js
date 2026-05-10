@@ -809,7 +809,33 @@ function updateClaw(dt) {
   switch (state) {
     case STATE.GRAB: {
       stateTimer += dt;
+      // Soft sweep — while the fingers curl, gently pull any loose prizes
+      // within the finger arc toward the claw center. Acts like the inside
+      // surface of a real claw scooping things in, and gives a prize that
+      // landed just outside the strict grab radius a chance to slide into
+      // it before the second-chance grab fires.
+      if (!claw.carried) {
+        const sweepR = ASSIST.grabRadius + 0.25;
+        for (const p of prizes) {
+          if (p.collected) continue;
+          const dx = claw.x - p.mesh.position.x;
+          const dz = claw.z - p.mesh.position.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > 1e-3 && dist < sweepR) {
+            const strength = (1 - dist / sweepR) * 3.5;
+            const nx = dx / dist;
+            const nz = dz / dist;
+            p.mesh.position.x += nx * strength * dt;
+            p.mesh.position.z += nz * strength * dt;
+            // Damp lateral velocity so prizes settle instead of jittering.
+            const damp = Math.max(0, 1 - dt * 6);
+            p.vel.x *= damp;
+            p.vel.z *= damp;
+          }
+        }
+      }
       if (stateTimer >= 0.55) {
+        if (!claw.carried) attemptGrab(); // second chance once the sweep has settled
         state = STATE.RAISING;
         stateTimer = 0;
       }
@@ -865,9 +891,14 @@ function updateClaw(dt) {
   if (claw.carried) {
     const p = claw.carried;
     const targetX = claw.x;
-    const tipY = claw.y - 0.78;
+    // Anchor the prize roughly where the fingers actually close around it
+    // (mid-finger length below the hub), not below the floor as before.
+    const tipY = claw.y - 0.30;
     const targetZ = claw.z;
-    const a = 1 - Math.exp(-22 * dt);
+    // Snap in fast while the fingers are still closing, then settle to a
+    // gentler track so swinging looks natural during the rest of the trip.
+    const lerpRate = state === STATE.GRAB ? 55 : 22;
+    const a = 1 - Math.exp(-lerpRate * dt);
     p.mesh.position.x += (targetX - p.mesh.position.x) * a;
     p.mesh.position.y += (tipY - p.mesh.position.y) * a;
     p.mesh.position.z += (targetZ - p.mesh.position.z) * a;
@@ -883,10 +914,12 @@ function updatePrizes(dt) {
     p.mesh.position.y += p.vel.y * dt;
     p.mesh.position.z += p.vel.z * dt;
 
-    // Claw hub acts as a soft sphere collider — descending claw shoves prizes
-    // around so the pile shifts and the prize you wanted isn't always there
-    // when you reach the bottom.
-    {
+    // Hub-push: only active while the claw is actively descending and still
+    // above the floor zone. Disabled near the bottom so the aim-assist can
+    // finish lining up the grab without scattering the target, and disabled
+    // in every other state so a prize released over the chute can fall
+    // straight down without the hub kicking it sideways.
+    if (state === STATE.DROPPING && claw.y > CLAW_BOUNDS.bottomY + 0.5) {
       const dx = p.mesh.position.x - claw.x;
       const dy = p.mesh.position.y - (claw.y - 0.1);
       const dz = p.mesh.position.z - claw.z;
@@ -895,7 +928,6 @@ function updatePrizes(dt) {
       if (distSq > 1e-6 && distSq < minDist * minDist) {
         const dist = Math.sqrt(distSq);
         const overlap = minDist - dist;
-        // Push laterally so the prize slides out from under the hub.
         const hMag = Math.hypot(dx, dz) || 1e-6;
         const nx = dx / hMag;
         const nz = dz / hMag;
