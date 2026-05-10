@@ -11,9 +11,11 @@ const CAB = {
 };
 
 const CHUTE = {
-  size: 1.2,
-  cx: -CAB.width / 2 + 0.9,
-  cz: -CAB.depth / 2 + 0.9,
+  size: 1.4,
+  cx: -CAB.width / 2 + 1.0,
+  cz: -CAB.depth / 2 + 1.0,
+  lipHeight: 0.6,
+  wallT: 0.10,
 };
 
 const CLAW_BOUNDS = {
@@ -25,9 +27,13 @@ const CLAW_BOUNDS = {
   bottomY: CAB.floorY + 0.7,
 };
 
-const PRIZE_COUNT = 14;
-const PRIZE_RADIUS = 0.42;
-const GRAB_RADIUS = 0.65;
+const PRIZE_COUNT = 30;
+const PRIZE_RADIUS = 0.40;
+const GRAB_RADIUS = 0.50; // tighter — the tip has to actually be over the prize
+const GRAB_BASE_CHANCE = 0.10; // at the very edge of the radius
+const GRAB_BEST_CHANCE = 0.62; // when the prize is dead-centered
+const SLIP_CHANCE = 0.32; // probability the prize slips during the trip home
+const CLAW_HUB_RADIUS = 0.36; // claw hub acts as a soft collider on descent
 
 // Movement tuning — input feeds a target velocity that's damped into actual.
 const MAX_HORIZ_SPEED = 3.0;
@@ -55,7 +61,7 @@ const renderer = new THREE.WebGLRenderer({
   alpha: false,
   powerPreference: "high-performance",
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -99,7 +105,7 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.45));
 const keyLight = new THREE.DirectionalLight(0xffffff, 0.9);
 keyLight.position.set(6, 12, 6);
 keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(1024, 1024);
+keyLight.shadow.mapSize.set(512, 512);
 keyLight.shadow.camera.left = -10;
 keyLight.shadow.camera.right = 10;
 keyLight.shadow.camera.top = 10;
@@ -154,15 +160,17 @@ function makeFloorWithHole() {
 }
 cabinet.add(makeFloorWithHole());
 
-const glassMat = new THREE.MeshPhysicalMaterial({
+// Cheap transparent glass — transmission/refraction was the biggest desktop
+// perf cost (a full extra render pass per frame). Standard transparent material
+// reads almost as nice and is dramatically faster.
+const glassMat = new THREE.MeshStandardMaterial({
   color: 0xaad9ff,
-  transmission: 0.85,
-  opacity: 0.35,
   transparent: true,
-  roughness: 0.05,
+  opacity: 0.18,
+  roughness: 0.1,
   metalness: 0.0,
-  thickness: 0.1,
   side: THREE.DoubleSide,
+  depthWrite: false,
 });
 
 function makeWall(w, h, d, x, y, z) {
@@ -203,13 +211,40 @@ makeBeam(BEAM, BEAM, CAB.depth + BEAM, -CAB.width / 2, 0, 0);
 makeBeam(BEAM, BEAM, CAB.depth + BEAM, CAB.width / 2, 0, 0);
 
 {
+  // Gold inset ring around the hole
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(CHUTE.size * 0.45, CHUTE.size * 0.55, 32),
+    new THREE.RingGeometry(CHUTE.size * 0.5 - 0.05, CHUTE.size * 0.5, 32),
     new THREE.MeshBasicMaterial({ color: 0xffcc44, side: THREE.DoubleSide }),
   );
   ring.rotation.x = -Math.PI / 2;
   ring.position.set(CHUTE.cx, CAB.floorY + 0.005, CHUTE.cz);
   cabinet.add(ring);
+
+  // Lip walls — a 4-sided low wall around the chute so prizes can't roll in
+  // by themselves. The claw has to actually lift one above lipHeight and drop
+  // it through.
+  const lipMat = new THREE.MeshStandardMaterial({
+    color: 0xffaa55,
+    metalness: 0.55,
+    roughness: 0.35,
+  });
+  const lipH = CHUTE.lipHeight;
+  const lipT = CHUTE.wallT;
+  const half = CHUTE.size / 2;
+  const outer = CHUTE.size + 2 * lipT;
+  const lipSpec = [
+    { w: outer, d: lipT, x: CHUTE.cx, z: CHUTE.cz + half + lipT / 2 },
+    { w: outer, d: lipT, x: CHUTE.cx, z: CHUTE.cz - half - lipT / 2 },
+    { w: lipT, d: outer, x: CHUTE.cx + half + lipT / 2, z: CHUTE.cz },
+    { w: lipT, d: outer, x: CHUTE.cx - half - lipT / 2, z: CHUTE.cz },
+  ];
+  for (const s of lipSpec) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(s.w, lipH, s.d), lipMat);
+    m.position.set(s.x, CAB.floorY + lipH / 2, s.z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    cabinet.add(m);
+  }
 }
 
 // --- Gantry & claw ---------------------------------------------------------
@@ -362,6 +397,11 @@ const claw = {
   curl: 0,
   curlTarget: 0,
   carried: null,
+  // Slip mechanic — when grabbed, sometimes the prize falls out during the
+  // raise / return. carryTime counts seconds since the grab; if slipAt > 0
+  // and carryTime reaches it, the prize drops.
+  carryTime: 0,
+  slipAt: 0,
 };
 
 function updateClawTransforms() {
@@ -393,20 +433,27 @@ function updateClawTransforms() {
 const prizeColors = [
   0xff5577, 0x59c2ff, 0xffd166, 0x06d6a0, 0xb388ff, 0xffa463, 0x4dd0e1,
 ];
+// Shared resources — reusing geometry and material across all prizes is far
+// cheaper than allocating per-mesh.
+const prizeSphereGeo = new THREE.SphereGeometry(PRIZE_RADIUS, 18, 14);
+const prizeIcoGeo = new THREE.IcosahedronGeometry(PRIZE_RADIUS, 0);
+const prizeMats = prizeColors.map(
+  (c) =>
+    new THREE.MeshStandardMaterial({
+      color: c,
+      roughness: 0.55,
+      metalness: 0.05,
+    }),
+);
 const prizes = [];
 
 function spawnPrizes() {
+  // Spawn in a central cluster at staggered heights so they pile up naturally
+  // once gravity settles them. A few small lateral nudges break perfect
+  // vertical stacks.
   for (let i = 0; i < PRIZE_COUNT; i++) {
-    const color = prizeColors[i % prizeColors.length];
-    const geo =
-      i % 3 === 0
-        ? new THREE.IcosahedronGeometry(PRIZE_RADIUS, 0)
-        : new THREE.SphereGeometry(PRIZE_RADIUS, 18, 14);
-    const mat = new THREE.MeshStandardMaterial({
-      color,
-      roughness: 0.55,
-      metalness: 0.05,
-    });
+    const mat = prizeMats[i % prizeMats.length];
+    const geo = i % 3 === 0 ? prizeIcoGeo : prizeSphereGeo;
     const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -414,17 +461,23 @@ function spawnPrizes() {
     let x, z;
     let attempts = 0;
     do {
-      x = (Math.random() - 0.5) * (CAB.width - 1.2);
-      z = (Math.random() - 0.5) * (CAB.depth - 1.2);
+      // Cluster prizes toward the +X / +Z side away from the chute corner.
+      x = -0.5 + (Math.random() - 0.5) * 3.2;
+      z = -0.5 + (Math.random() - 0.5) * 2.8;
       attempts++;
-    } while (insideChute(x, z) && attempts < 20);
+    } while (nearChute(x, z, 0.8) && attempts < 30);
 
-    mesh.position.set(x, PRIZE_RADIUS + 0.05, z);
+    const y = PRIZE_RADIUS + 0.4 + Math.random() * 4.5;
+    mesh.position.set(x, y, z);
     scene.add(mesh);
 
     prizes.push({
       mesh,
-      vel: new THREE.Vector3(0, 0, 0),
+      vel: new THREE.Vector3(
+        (Math.random() - 0.5) * 0.4,
+        0,
+        (Math.random() - 0.5) * 0.4,
+      ),
       radius: PRIZE_RADIUS,
       collected: false,
     });
@@ -436,6 +489,13 @@ function insideChute(x, z) {
   return (
     Math.abs(x - CHUTE.cx) < CHUTE.size / 2 &&
     Math.abs(z - CHUTE.cz) < CHUTE.size / 2
+  );
+}
+
+function nearChute(x, z, margin) {
+  return (
+    Math.abs(x - CHUTE.cx) < CHUTE.size / 2 + margin &&
+    Math.abs(z - CHUTE.cz) < CHUTE.size / 2 + margin
   );
 }
 
@@ -712,6 +772,8 @@ function updateClaw(dt) {
           claw.carried.vel.set(0, 0, 0);
           claw.carried = null;
         }
+        claw.carryTime = 0;
+        claw.slipAt = 0;
         state = STATE.IDLE;
         dropBtn.disabled = false;
         setStatus("Move the claw and press Drop");
@@ -724,7 +786,20 @@ function updateClaw(dt) {
     }
   }
 
-  // Carried prize tracks the claw tip smoothly each frame.
+  // Carried prize tracks the claw tip smoothly each frame, with a chance
+  // of slipping mid-flight if the grab was rolled "loose".
+  if (claw.carried) {
+    claw.carryTime += dt;
+    if (claw.slipAt > 0 && claw.carryTime >= claw.slipAt) {
+      const p = claw.carried;
+      // Inherit current claw motion + a small downward kick.
+      p.vel.set(claw.vx * 0.6, -0.5, claw.vz * 0.6);
+      claw.carried = null;
+      claw.slipAt = 0;
+      claw.curlTarget = 0; // open fingers as it lets go
+      setStatus("It slipped!");
+    }
+  }
   if (claw.carried) {
     const p = claw.carried;
     const targetX = claw.x;
@@ -745,6 +820,59 @@ function updatePrizes(dt) {
     p.mesh.position.x += p.vel.x * dt;
     p.mesh.position.y += p.vel.y * dt;
     p.mesh.position.z += p.vel.z * dt;
+
+    // Claw hub acts as a soft sphere collider — descending claw shoves prizes
+    // around so the pile shifts and the prize you wanted isn't always there
+    // when you reach the bottom.
+    {
+      const dx = p.mesh.position.x - claw.x;
+      const dy = p.mesh.position.y - (claw.y - 0.1);
+      const dz = p.mesh.position.z - claw.z;
+      const minDist = CLAW_HUB_RADIUS + p.radius;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq > 1e-6 && distSq < minDist * minDist) {
+        const dist = Math.sqrt(distSq);
+        const overlap = minDist - dist;
+        // Push laterally so the prize slides out from under the hub.
+        const hMag = Math.hypot(dx, dz) || 1e-6;
+        const nx = dx / hMag;
+        const nz = dz / hMag;
+        p.mesh.position.x += nx * overlap;
+        p.mesh.position.z += nz * overlap;
+        p.vel.x += nx * 0.8;
+        p.vel.z += nz * 0.8;
+      }
+    }
+
+    // Chute lip — square ring of walls around the chute opening, only active
+    // for prizes that are at or below the lip height. Above the lip, prizes
+    // can travel freely (and the claw can drop them in from above).
+    if (p.mesh.position.y - p.radius < CAB.floorY + CHUTE.lipHeight) {
+      const half = CHUTE.size / 2;
+      const dx = p.mesh.position.x - CHUTE.cx;
+      const dz = p.mesh.position.z - CHUTE.cz;
+      const insideFootprint = Math.abs(dx) < half && Math.abs(dz) < half;
+      if (!insideFootprint) {
+        const closestX = clamp(p.mesh.position.x, CHUTE.cx - half, CHUTE.cx + half);
+        const closestZ = clamp(p.mesh.position.z, CHUTE.cz - half, CHUTE.cz + half);
+        const ddx = p.mesh.position.x - closestX;
+        const ddz = p.mesh.position.z - closestZ;
+        const distSq = ddx * ddx + ddz * ddz;
+        if (distSq < p.radius * p.radius && distSq > 1e-6) {
+          const dist = Math.sqrt(distSq);
+          const overlap = p.radius - dist;
+          const nx = ddx / dist;
+          const nz = ddz / dist;
+          p.mesh.position.x += nx * overlap;
+          p.mesh.position.z += nz * overlap;
+          const vDot = p.vel.x * nx + p.vel.z * nz;
+          if (vDot < 0) {
+            p.vel.x -= 1.3 * vDot * nx;
+            p.vel.z -= 1.3 * vDot * nz;
+          }
+        }
+      }
+    }
 
     if (
       p.mesh.position.y < -1.5 ||
@@ -839,28 +967,47 @@ function visualUpdate(dt) {
 }
 
 function attemptGrab() {
+  // The "tip" for grab purposes is the bottom of the curled fingers, roughly
+  // 0.7 units below the hub. Only horizontal alignment really matters — the
+  // claw has to be over the prize.
   const tipX = claw.x;
-  const tipY = claw.y - 0.55;
   const tipZ = claw.z;
   let best = null;
-  let bestDistSq = GRAB_RADIUS * GRAB_RADIUS;
+  let bestHoriz = Infinity;
   for (const p of prizes) {
     if (p.collected) continue;
     const dx = p.mesh.position.x - tipX;
-    const dy = p.mesh.position.y - tipY;
     const dz = p.mesh.position.z - tipZ;
-    const dSq = dx * dx + dy * dy + dz * dz;
-    if (dSq < bestDistSq) {
-      bestDistSq = dSq;
+    const horiz = Math.hypot(dx, dz);
+    if (horiz < bestHoriz) {
+      bestHoriz = horiz;
       best = p;
     }
   }
-  if (best && Math.random() < 0.7) {
-    claw.carried = best;
-    setStatus("Grabbed!");
+  if (!best || bestHoriz > GRAB_RADIUS) {
+    setStatus("Missed — try again");
     return;
   }
-  setStatus("Missed — try again");
+
+  // Distance-modulated probability — dead-centered hits are pretty likely,
+  // grazing the edge of GRAB_RADIUS is almost always a miss.
+  const closeness = 1 - bestHoriz / GRAB_RADIUS;
+  const chance =
+    GRAB_BASE_CHANCE + (GRAB_BEST_CHANCE - GRAB_BASE_CHANCE) * closeness;
+
+  if (Math.random() < chance) {
+    claw.carried = best;
+    claw.carryTime = 0;
+    // Sometimes the grip is loose and the prize slips on the way home.
+    if (Math.random() < SLIP_CHANCE) {
+      claw.slipAt = 0.4 + Math.random() * 1.8; // seconds after grab
+    } else {
+      claw.slipAt = 0;
+    }
+    setStatus("Grabbed!");
+  } else {
+    setStatus("Slipped out — try again");
+  }
 }
 
 function clamp(v, lo, hi) {
