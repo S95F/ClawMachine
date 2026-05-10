@@ -39,10 +39,13 @@ const GRAVITY = -9.0;
 const PHYS_DT = 1 / 120;
 const MAX_FRAME_DT = 1 / 30;
 
-// Finger curl tuning (per joint, radians; positive = inward curl)
-const FINGER_REST = [-0.18, -0.05, 0.05]; // open/relaxed
-const FINGER_CLOSE = [0.55, 0.85, 0.95]; // closed/grabbing
-const FINGER_LERP = 9.0; // smoothing rate (higher = snappier)
+// Finger curl angles per joint (rotation.z, radians).
+// Positive z splays the segment outward; negative curls it inward toward the hub center.
+// OPEN  → idle / moving / dropping (fingers fanned outward)
+// CLOSED → grabbing / raising / returning (fingers clenched under the hub)
+const FINGER_OPEN = [0.22, 0.16, 0.08];
+const FINGER_CLOSED = [-0.12, -0.50, -0.85];
+const FINGER_LERP = 11.0; // smoothing rate (higher = snappier)
 
 // --- Renderer / scene -------------------------------------------------------
 const canvas = document.getElementById("scene");
@@ -340,7 +343,7 @@ for (let i = 0; i < FINGER_COUNT; i++) {
   const f = buildFinger(angle);
   // Initialize at rest pose
   for (let j = 0; j < f.pivots.length; j++) {
-    f.pivots[j].rotation.z = FINGER_REST[j];
+    f.pivots[j].rotation.z = FINGER_OPEN[j];
   }
   clawGroup.add(f.root);
   fingers.push(f);
@@ -376,11 +379,12 @@ function updateClawTransforms() {
 
   clawGroup.position.set(0, claw.y, claw.z);
 
-  // Apply curl angles per joint, eased between rest and close pose.
+  // Apply curl angles per joint, eased between open and closed pose.
+  // curl=0 → fully OPEN, curl=1 → fully CLOSED.
   const c = claw.curl;
   for (const f of fingers) {
     for (let j = 0; j < f.pivots.length; j++) {
-      f.pivots[j].rotation.z = FINGER_REST[j] * (1 - c) + FINGER_CLOSE[j] * c;
+      f.pivots[j].rotation.z = FINGER_OPEN[j] * (1 - c) + FINGER_CLOSED[j] * c;
     }
   }
 }
@@ -585,19 +589,28 @@ let physAccumulator = 0;
 
 function loop() {
   const frameDt = Math.min(clock.getDelta(), MAX_FRAME_DT);
+
+  // Claw + state machine in per-frame time so motion is buttery smooth
+  // regardless of physics substep cadence.
+  updateClaw(frameDt);
+
+  // Prize physics in fixed substeps for stable contacts.
   physAccumulator += frameDt;
-  while (physAccumulator >= PHYS_DT) {
-    fixedUpdate(PHYS_DT);
+  let steps = 0;
+  while (physAccumulator >= PHYS_DT && steps < 8) {
+    updatePrizes(PHYS_DT);
     physAccumulator -= PHYS_DT;
+    steps++;
   }
-  // Smoothly drive visual properties even if no physics step happened
+  if (steps === 8) physAccumulator = 0; // bleed off if we fell behind
+
   visualUpdate(frameDt);
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
 
-function fixedUpdate(dt) {
+function updateClaw(dt) {
   // Camera-relative target velocity from input, only when idle.
   let tvx = 0,
     tvz = 0;
@@ -617,18 +630,17 @@ function fixedUpdate(dt) {
       tvz = (_camForward.z * f + _camRight.z * r) * MAX_HORIZ_SPEED;
     }
   } else if (state === STATE.RETURNING) {
-    // Smooth approach to chute
     const dx = CHUTE.cx - claw.x;
     const dz = CHUTE.cz - claw.z;
     const dist = Math.hypot(dx, dz);
     if (dist > 1e-3) {
-      const s = Math.min(MAX_HORIZ_SPEED, dist * 4); // ease-in
+      const s = Math.min(MAX_HORIZ_SPEED, dist * 4);
       tvx = (dx / dist) * s;
       tvz = (dz / dist) * s;
     }
   }
 
-  // Damped velocity integration (exponential smoothing toward target)
+  // Frame-rate-independent exponential smoothing of velocity.
   const k = 1 - Math.exp(-HORIZ_ACCEL * dt);
   claw.vx += (tvx - claw.vx) * k;
   claw.vz += (tvz - claw.vz) * k;
@@ -637,34 +649,47 @@ function fixedUpdate(dt) {
   claw.x = clamp(claw.x, CLAW_BOUNDS.minX, CLAW_BOUNDS.maxX);
   claw.z = clamp(claw.z, CLAW_BOUNDS.minZ, CLAW_BOUNDS.maxZ);
 
-  // Drop sequence
+  // Vertical drop / raise eased toward a target altitude (no constant-velocity
+  // teleporting between substeps — this is the source of the up/down jitter).
+  let targetY = claw.y;
   switch (state) {
-    case STATE.DROPPING: {
-      claw.y -= VERTICAL_SPEED * dt;
-      if (claw.y <= CLAW_BOUNDS.bottomY) {
-        claw.y = CLAW_BOUNDS.bottomY;
+    case STATE.DROPPING:
+      targetY = CLAW_BOUNDS.bottomY;
+      break;
+    case STATE.RAISING:
+      targetY = CLAW_BOUNDS.topY;
+      break;
+    default:
+      targetY = claw.y;
+  }
+  if (state === STATE.DROPPING || state === STATE.RAISING) {
+    const dy = targetY - claw.y;
+    const maxStep = VERTICAL_SPEED * dt;
+    // Cap step so motion is linear/predictable, but glide the last bit so
+    // we don't slam against the bound.
+    const step = Math.sign(dy) * Math.min(Math.abs(dy), maxStep);
+    claw.y += step;
+    if (Math.abs(targetY - claw.y) < 1e-3) {
+      claw.y = targetY;
+      if (state === STATE.DROPPING) {
         state = STATE.GRAB;
         stateTimer = 0;
         claw.curlTarget = 1;
         attemptGrab();
+      } else {
+        state = STATE.RETURNING;
+        stateTimer = 0;
+        setStatus("Returning to chute...");
       }
-      break;
     }
+  }
+
+  switch (state) {
     case STATE.GRAB: {
       stateTimer += dt;
       if (stateTimer >= 0.55) {
         state = STATE.RAISING;
         stateTimer = 0;
-      }
-      break;
-    }
-    case STATE.RAISING: {
-      claw.y += VERTICAL_SPEED * dt;
-      if (claw.y >= CLAW_BOUNDS.topY) {
-        claw.y = CLAW_BOUNDS.topY;
-        state = STATE.RETURNING;
-        stateTimer = 0;
-        setStatus("Returning to chute...");
       }
       break;
     }
@@ -699,20 +724,21 @@ function fixedUpdate(dt) {
     }
   }
 
-  // Carried prize tracks the claw tip smoothly.
+  // Carried prize tracks the claw tip smoothly each frame.
   if (claw.carried) {
     const p = claw.carried;
     const targetX = claw.x;
-    const targetY = claw.y - 0.78;
+    const tipY = claw.y - 0.78;
     const targetZ = claw.z;
-    const a = 1 - Math.exp(-18 * dt);
+    const a = 1 - Math.exp(-22 * dt);
     p.mesh.position.x += (targetX - p.mesh.position.x) * a;
-    p.mesh.position.y += (targetY - p.mesh.position.y) * a;
+    p.mesh.position.y += (tipY - p.mesh.position.y) * a;
     p.mesh.position.z += (targetZ - p.mesh.position.z) * a;
     p.vel.set(0, 0, 0);
   }
+}
 
-  // Free-prize physics
+function updatePrizes(dt) {
   for (const p of prizes) {
     if (p === claw.carried || p.collected) continue;
     p.vel.y += GRAVITY * dt;
