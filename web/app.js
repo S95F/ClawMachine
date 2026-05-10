@@ -38,10 +38,10 @@ const AIM_SEARCH_RADIUS = 1.8; // max distance the aim-assist will pull toward
 // add an aim-assist that pulls the claw toward the nearest prize while it
 // descends. Selection is persisted to localStorage.
 const ASSIST_LEVELS = [
-  { name: "Off",    cls: "lvl-off",    grabRadius: 0.50, baseChance: 0.10, bestChance: 0.62, slip: 0.32, hubPush: 0.80, aimSpeed: 0.0 },
-  { name: "Light",  cls: "lvl-light",  grabRadius: 0.62, baseChance: 0.22, bestChance: 0.78, slip: 0.18, hubPush: 0.55, aimSpeed: 1.2 },
-  { name: "Medium", cls: "lvl-medium", grabRadius: 0.78, baseChance: 0.42, bestChance: 0.92, slip: 0.08, hubPush: 0.35, aimSpeed: 2.4 },
-  { name: "Strong", cls: "lvl-strong", grabRadius: 1.00, baseChance: 0.70, bestChance: 1.00, slip: 0.00, hubPush: 0.15, aimSpeed: 4.0 },
+  { name: "Off",    cls: "lvl-off",    grabRadius: 0.50, baseChance: 0.10, bestChance: 0.62, slip: 0.30, hubPush: 0.80, aimSpeed: 0.0 },
+  { name: "Light",  cls: "lvl-light",  grabRadius: 0.60, baseChance: 0.18, bestChance: 0.68, slip: 0.00, hubPush: 0.55, aimSpeed: 0.9 },
+  { name: "Medium", cls: "lvl-medium", grabRadius: 0.72, baseChance: 0.32, bestChance: 0.82, slip: 0.00, hubPush: 0.35, aimSpeed: 1.8 },
+  { name: "Strong", cls: "lvl-strong", grabRadius: 0.92, baseChance: 0.55, bestChance: 0.95, slip: 0.00, hubPush: 0.15, aimSpeed: 3.0 },
 ];
 function loadAssistIdx() {
   const saved = parseInt(localStorage.getItem("claw.assist") || "", 10);
@@ -810,24 +810,22 @@ function updateClaw(dt) {
     case STATE.GRAB: {
       stateTimer += dt;
       // Soft sweep — while the fingers curl, gently pull any loose prizes
-      // within the finger arc toward the claw center. Acts like the inside
-      // surface of a real claw scooping things in, and gives a prize that
-      // landed just outside the strict grab radius a chance to slide into
-      // it before the second-chance grab fires.
+      // within the finger arc toward the claw center so the catch reads
+      // as a scoop instead of a teleport. The sweep is purely visual /
+      // physical; the grab decision was already made at descent bottom.
       if (!claw.carried) {
-        const sweepR = ASSIST.grabRadius + 0.25;
+        const sweepR = ASSIST.grabRadius + 0.12;
         for (const p of prizes) {
           if (p.collected) continue;
           const dx = claw.x - p.mesh.position.x;
           const dz = claw.z - p.mesh.position.z;
           const dist = Math.hypot(dx, dz);
           if (dist > 1e-3 && dist < sweepR) {
-            const strength = (1 - dist / sweepR) * 3.5;
+            const strength = (1 - dist / sweepR) * 2.0;
             const nx = dx / dist;
             const nz = dz / dist;
             p.mesh.position.x += nx * strength * dt;
             p.mesh.position.z += nz * strength * dt;
-            // Damp lateral velocity so prizes settle instead of jittering.
             const damp = Math.max(0, 1 - dt * 6);
             p.vel.x *= damp;
             p.vel.z *= damp;
@@ -835,7 +833,6 @@ function updateClaw(dt) {
         }
       }
       if (stateTimer >= 0.55) {
-        if (!claw.carried) attemptGrab(); // second chance once the sweep has settled
         state = STATE.RAISING;
         stateTimer = 0;
       }
