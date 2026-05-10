@@ -60,10 +60,51 @@ body {
   pointer-events: auto;
 }
 
+.hud-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 #score {
   font-weight: 700;
   font-size: 16px;
   color: var(--accent-2);
+}
+
+.assist-btn {
+  appearance: none;
+  border: 0;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 6px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.05s ease;
+}
+
+.assist-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.assist-btn:active {
+  transform: scale(0.96);
+}
+
+.assist-btn.lvl-light {
+  background: rgba(89, 194, 255, 0.25);
+}
+
+.assist-btn.lvl-medium {
+  background: rgba(255, 209, 102, 0.28);
+}
+
+.assist-btn.lvl-strong {
+  background: rgba(255, 85, 119, 0.32);
 }
 
 #status {

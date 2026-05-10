@@ -29,11 +29,29 @@ const CLAW_BOUNDS = {
 
 const PRIZE_COUNT = 30;
 const PRIZE_RADIUS = 0.40;
-const GRAB_RADIUS = 0.50; // tighter — the tip has to actually be over the prize
-const GRAB_BASE_CHANCE = 0.10; // at the very edge of the radius
-const GRAB_BEST_CHANCE = 0.62; // when the prize is dead-centered
-const SLIP_CHANCE = 0.32; // probability the prize slips during the trip home
-const CLAW_HUB_RADIUS = 0.36; // claw hub acts as a soft collider on descent
+const CLAW_HUB_RADIUS = 0.36;
+const AIM_SEARCH_RADIUS = 1.8; // max distance the aim-assist will pull toward
+
+// Configurable difficulty / assistance. Cycle through these via the
+// "Assist:" button in the HUD. "Off" is the base challenge — higher levels
+// widen the grab tolerance, boost the probability, soften prize scatter and
+// add an aim-assist that pulls the claw toward the nearest prize while it
+// descends. Selection is persisted to localStorage.
+const ASSIST_LEVELS = [
+  { name: "Off",    cls: "lvl-off",    grabRadius: 0.50, baseChance: 0.10, bestChance: 0.62, slip: 0.32, hubPush: 0.80, aimSpeed: 0.0 },
+  { name: "Light",  cls: "lvl-light",  grabRadius: 0.62, baseChance: 0.22, bestChance: 0.78, slip: 0.18, hubPush: 0.55, aimSpeed: 1.2 },
+  { name: "Medium", cls: "lvl-medium", grabRadius: 0.78, baseChance: 0.42, bestChance: 0.92, slip: 0.08, hubPush: 0.35, aimSpeed: 2.4 },
+  { name: "Strong", cls: "lvl-strong", grabRadius: 1.00, baseChance: 0.70, bestChance: 1.00, slip: 0.00, hubPush: 0.15, aimSpeed: 4.0 },
+];
+function loadAssistIdx() {
+  const saved = parseInt(localStorage.getItem("claw.assist") || "", 10);
+  if (Number.isInteger(saved) && saved >= 0 && saved < ASSIST_LEVELS.length) {
+    return saved;
+  }
+  return 1; // default to Light — user needs help to get started
+}
+let assistIdx = loadAssistIdx();
+let ASSIST = ASSIST_LEVELS[assistIdx];
 
 // Movement tuning — input feeds a target velocity that's damped into actual.
 const MAX_HORIZ_SPEED = 3.0;
@@ -592,6 +610,25 @@ document.getElementById("reset-view").addEventListener("click", () => {
   controls.update();
 });
 
+// Assist level cycler
+const assistBtn = document.getElementById("assist-btn");
+function paintAssistBtn() {
+  assistBtn.textContent = `Assist: ${ASSIST.name}`;
+  assistBtn.className = `assist-btn ${ASSIST.cls}`;
+}
+function cycleAssist() {
+  assistIdx = (assistIdx + 1) % ASSIST_LEVELS.length;
+  ASSIST = ASSIST_LEVELS[assistIdx];
+  try {
+    localStorage.setItem("claw.assist", String(assistIdx));
+  } catch (_) {
+    // localStorage may be unavailable (private mode); ignore.
+  }
+  paintAssistBtn();
+}
+assistBtn.addEventListener("click", cycleAssist);
+paintAssistBtn();
+
 // --- Game state ------------------------------------------------------------
 const STATE = {
   IDLE: "idle",
@@ -697,6 +734,31 @@ function updateClaw(dt) {
       const s = Math.min(MAX_HORIZ_SPEED, dist * 4);
       tvx = (dx / dist) * s;
       tvz = (dz / dist) * s;
+    }
+  } else if (state === STATE.DROPPING && ASSIST.aimSpeed > 0) {
+    // Aim-assist: gently pull the claw toward the nearest in-range prize as
+    // it descends. Search radius keeps it from teleporting across the
+    // cabinet — only locks onto prizes that are roughly under the claw.
+    let nearest = null;
+    let bestDist = AIM_SEARCH_RADIUS;
+    for (const p of prizes) {
+      if (p.collected) continue;
+      const dx = p.mesh.position.x - claw.x;
+      const dz = p.mesh.position.z - claw.z;
+      const d = Math.hypot(dx, dz);
+      if (d < bestDist) {
+        bestDist = d;
+        nearest = p;
+      }
+    }
+    if (nearest) {
+      const dx = nearest.mesh.position.x - claw.x;
+      const dz = nearest.mesh.position.z - claw.z;
+      const dist = Math.hypot(dx, dz) || 1e-6;
+      // Ease in: scale down when already close so we don't oscillate.
+      const speed = Math.min(ASSIST.aimSpeed, dist * 6);
+      tvx = (dx / dist) * speed;
+      tvz = (dz / dist) * speed;
     }
   }
 
@@ -839,8 +901,8 @@ function updatePrizes(dt) {
         const nz = dz / hMag;
         p.mesh.position.x += nx * overlap;
         p.mesh.position.z += nz * overlap;
-        p.vel.x += nx * 0.8;
-        p.vel.z += nz * 0.8;
+        p.vel.x += nx * ASSIST.hubPush;
+        p.vel.z += nz * ASSIST.hubPush;
       }
     }
 
@@ -984,22 +1046,21 @@ function attemptGrab() {
       best = p;
     }
   }
-  if (!best || bestHoriz > GRAB_RADIUS) {
+  if (!best || bestHoriz > ASSIST.grabRadius) {
     setStatus("Missed — try again");
     return;
   }
 
-  // Distance-modulated probability — dead-centered hits are pretty likely,
-  // grazing the edge of GRAB_RADIUS is almost always a miss.
-  const closeness = 1 - bestHoriz / GRAB_RADIUS;
+  // Distance-modulated probability — dead-centered hits are likely, grazing
+  // the edge of the (assist-tuned) radius is almost always a miss.
+  const closeness = 1 - bestHoriz / ASSIST.grabRadius;
   const chance =
-    GRAB_BASE_CHANCE + (GRAB_BEST_CHANCE - GRAB_BASE_CHANCE) * closeness;
+    ASSIST.baseChance + (ASSIST.bestChance - ASSIST.baseChance) * closeness;
 
   if (Math.random() < chance) {
     claw.carried = best;
     claw.carryTime = 0;
-    // Sometimes the grip is loose and the prize slips on the way home.
-    if (Math.random() < SLIP_CHANCE) {
+    if (ASSIST.slip > 0 && Math.random() < ASSIST.slip) {
       claw.slipAt = 0.4 + Math.random() * 1.8; // seconds after grab
     } else {
       claw.slipAt = 0;
