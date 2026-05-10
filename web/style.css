@@ -1,0 +1,189 @@
+:root {
+  --bg: #0e0e1a;
+  --panel: rgba(20, 20, 36, 0.72);
+  --accent: #ff5577;
+  --accent-2: #59c2ff;
+  --text: #f4f4ff;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+#scene {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+}
+
+#hud {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: env(safe-area-inset-top, 12px) 14px 10px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.hud-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  pointer-events: auto;
+}
+
+#score {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--accent-2);
+}
+
+#status {
+  opacity: 0.85;
+  text-align: right;
+}
+
+.controls {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 14px 16px calc(env(safe-area-inset-bottom, 16px) + 14px);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 18px;
+  z-index: 10;
+}
+
+.dpad {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.dir {
+  appearance: none;
+  border: 0;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 22px;
+  border-radius: 14px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.05s ease, background 0.15s ease;
+}
+
+.dir:active,
+.dir.active {
+  background: rgba(89, 194, 255, 0.35);
+  transform: scale(0.96);
+}
+
+.dir.up {
+  grid-column: 2;
+  grid-row: 1;
+}
+.dir.left {
+  grid-column: 1;
+  grid-row: 2;
+}
+.dir.right {
+  grid-column: 3;
+  grid-row: 2;
+}
+.dir.down {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+.drop {
+  appearance: none;
+  border: 0;
+  background: linear-gradient(160deg, #ff5577, #c43760);
+  color: white;
+  font-weight: 800;
+  font-size: 20px;
+  letter-spacing: 0.12em;
+  width: 110px;
+  height: 110px;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(196, 55, 96, 0.4),
+    inset 0 -4px 0 rgba(0, 0, 0, 0.18);
+  transition: transform 0.05s ease, filter 0.15s ease;
+}
+
+.drop:active {
+  transform: scale(0.95);
+}
+
+.drop:disabled {
+  filter: grayscale(0.5) brightness(0.6);
+  cursor: not-allowed;
+}
+
+@media (max-width: 380px) {
+  .dpad {
+    width: 144px;
+    height: 144px;
+  }
+  .drop {
+    width: 96px;
+    height: 96px;
+    font-size: 18px;
+  }
+  .hud-row {
+    font-size: 12px;
+  }
+  #score {
+    font-size: 14px;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 480px) {
+  .dpad {
+    width: 140px;
+    height: 140px;
+  }
+  .drop {
+    width: 96px;
+    height: 96px;
+  }
+}

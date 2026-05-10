@@ -1,0 +1,12 @@
+# Built binary (named by serverGitUpdater build template)
+/clawmachine
+
+# Local serverGitUpdater state
+config.json
+updates.log
+
+# Editor / OS junk
+.DS_Store
+.idea/
+.vscode/
+*.swp

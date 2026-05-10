@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0e0e1a" />
+    <title>Claw Machine</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="icon" href="data:," />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hud">
+      <div class="hud-row">
+        <div id="score">Score: 0</div>
+        <div id="status">Move the claw and press Drop</div>
+      </div>
+    </div>
+
+    <canvas id="scene"></canvas>
+
+    <div id="controls" class="controls">
+      <div class="dpad" aria-label="Move claw">
+        <button class="dir up" data-dir="forward" aria-label="Forward">▲</button>
+        <button class="dir left" data-dir="left" aria-label="Left">◀</button>
+        <button class="dir right" data-dir="right" aria-label="Right">▶</button>
+        <button class="dir down" data-dir="back" aria-label="Back">▼</button>
+      </div>
+      <button id="drop" class="drop">DROP</button>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
